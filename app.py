@@ -298,15 +298,19 @@ def get_gemini_client():
 def call_gemini(client, prompt: str, grounded: bool = True) -> str:
     from google.genai import types
 
-    # Use gemini-2.5-flash (stable, available to all keys)
-    MODEL = "gemini-2.5-flash-preview-04-17"
+    # Model fallback chain — tries newest first, falls back to universally available
+    MODELS = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+    ]
 
-    def _call(use_grounding: bool) -> str:
+    def _call(model: str, use_grounding: bool) -> str:
         kwargs = {"temperature": 0.7, "max_output_tokens": 4096}
         if use_grounding:
             kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
         response = client.models.generate_content(
-            model=MODEL,
+            model=model,
             contents=prompt,
             config=types.GenerateContentConfig(**kwargs),
         )
@@ -319,16 +323,30 @@ def call_gemini(client, prompt: str, grounded: bool = True) -> str:
                     parts.append(part.text)
         return "\n".join(parts)
 
+    def _call_with_fallback(use_grounding: bool) -> str:
+        last_err = None
+        for model in MODELS:
+            try:
+                return _call(model, use_grounding)
+            except Exception as e:
+                err = str(e).lower()
+                # Only retry on model-not-found errors
+                if any(x in err for x in ["not_found", "404", "not found", "deprecated", "no longer available"]):
+                    last_err = e
+                    continue
+                raise  # Re-raise non-model errors immediately
+        raise last_err  # All models failed
+
     if grounded:
         try:
-            return _call(True)
+            return _call_with_fallback(True)
         except Exception as e:
             err = str(e).lower()
-            if any(x in err for x in ["grounding", "search", "tool", "400", "403", "permission", "not_found", "404"]):
+            if any(x in err for x in ["grounding", "search", "tool", "400", "403", "permission"]):
                 st.warning("Google Search grounding unavailable — generating without live web data.", icon="🔍")
-                return _call(False)
+                return _call_with_fallback(False)
             raise
-    return _call(False)
+    return _call_with_fallback(False)
 
 
 def parse_json(text: str):
